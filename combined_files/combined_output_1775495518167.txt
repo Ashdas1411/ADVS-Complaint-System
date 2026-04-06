@@ -1,0 +1,2659 @@
+// File: analytics.py
+# from fastapi import APIRouter, Depends
+# from sqlalchemy.orm import Session
+# from sqlalchemy import func
+# from datetime import datetime, timedelta
+
+# from database import SessionLocal
+# import models
+
+# router = APIRouter()
+
+
+# def get_db():
+#     db = SessionLocal()
+#     try:
+#         yield db
+#     finally:
+#         db.close()
+
+
+# @router.get("/analytics")
+# def get_analytics(db: Session = Depends(get_db)):
+#     total = db.query(models.Complaint).count()
+
+#     category_counts = (
+#         db.query(models.Complaint.category, func.count(models.Complaint.id))
+#         .group_by(models.Complaint.category)
+#         .all()
+#     )
+
+#     urgency_counts = (
+#         db.query(models.Complaint.urgency, func.count(models.Complaint.id))
+#         .group_by(models.Complaint.urgency)
+#         .all()
+#     )
+
+#     one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+
+#     last_hour_count = (
+#         db.query(models.Complaint)
+#         .filter(models.Complaint.created_at >= one_hour_ago)
+#         .count()
+#     )
+
+#     spike_detected = False
+#     if total > 0:
+#         average_per_hour = total / 24  # simple assumption
+#         if last_hour_count > 2 * average_per_hour:
+#             spike_detected = True
+
+#     return {
+#         "total_complaints": total,
+#         "category_distribution": dict(category_counts),
+#         "urgency_distribution": dict(urgency_counts),
+#         "last_hour_complaints": last_hour_count,
+#         "spike_detected": spike_detected
+#     }
+
+
+
+
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from datetime import datetime, timedelta
+from typing import Optional
+
+from database import SessionLocal
+import models
+
+router = APIRouter()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@router.get("/analytics")
+def get_analytics(db: Session = Depends(get_db)):
+    total = db.query(models.Complaint).count()
+
+    # 1. Group by the LOWERCASE version of the string to merge duplicates
+    category_counts = (
+        db.query(func.lower(models.Complaint.category), func.count(models.Complaint.id))
+        .group_by(func.lower(models.Complaint.category))
+        .all()
+    )
+
+    # Apply the same case-insensitive grouping to urgency
+    urgency_counts = (
+        db.query(func.lower(models.Complaint.urgency), func.count(models.Complaint.id))
+        .group_by(func.lower(models.Complaint.urgency))
+        .all()
+    )
+
+    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+
+    last_hour_count = (
+        db.query(models.Complaint)
+        .filter(models.Complaint.created_at >= one_hour_ago)
+        .count()
+    )
+
+    spike_detected = False
+    if total > 0:
+        average_per_hour = total / 24  # simple assumption
+        if last_hour_count > 2 * average_per_hour:
+            spike_detected = True
+
+    # 2. Format the keys into clean Title Case (e.g., "maintenance" -> "Maintenance")
+    formatted_categories = { (k.title() if k else "Unknown"): v for k, v in category_counts }
+    formatted_urgencies = { (k.title() if k else "Unknown"): v for k, v in urgency_counts }
+
+    return {
+        "total_complaints": total,
+        "category_distribution": formatted_categories,
+        "urgency_distribution": formatted_urgencies,
+        "last_hour_complaints": last_hour_count,
+        "spike_detected": spike_detected
+    }
+
+@router.get("/analytics/student")
+def get_student_analytics(email: str, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user:
+        return {"total": 0, "resolved": 0, "pending": 0, "category_distribution": {}}
+
+    complaints = db.query(models.Complaint).filter(models.Complaint.user_id == user.id).all()
+    total    = len(complaints)
+    resolved = sum(1 for c in complaints if c.status == "completed")
+    pending  = sum(1 for c in complaints if c.status != "completed")
+
+    cat_counts = {}
+    for c in complaints:
+        key = (c.category or "unknown").lower().title()
+        cat_counts[key] = cat_counts.get(key, 0) + 1
+
+    return {
+        "total":                total,
+        "resolved":             resolved,
+        "pending":              pending,
+        "category_distribution": cat_counts,
+    }
+
+
+@router.get("/analytics/staff")
+def get_staff_analytics(staff_id: Optional[str] = None, db: Session = Depends(get_db)):
+    all_complaints = db.query(models.Complaint).all()
+    total    = len(all_complaints)
+    pending  = sum(1 for c in all_complaints if c.status != "completed")
+
+    high_priority_pending = sum(
+        1 for c in all_complaints
+        if c.status != "completed" and (c.urgency or "").lower() in ("high", "critical")
+    )
+
+    # Resolved counts scoped to this staff member if staff_id provided
+    if staff_id:
+        resolved_complaints = [c for c in all_complaints if c.status == "completed" and c.resolved_by == staff_id]
+    else:
+        resolved_complaints = [c for c in all_complaints if c.status == "completed"]
+
+    resolved = len(resolved_complaints)
+
+    one_week_ago = datetime.utcnow() - timedelta(days=7)
+    resolved_this_week = sum(
+        1 for c in resolved_complaints
+        if c.created_at and c.created_at.replace(tzinfo=None) >= one_week_ago
+    )
+
+    dept_pending = {}
+    urgency_pending = {}
+    for c in all_complaints:
+        if c.status != "completed":
+            dk = (c.department or "unknown").lower().title()
+            dept_pending[dk] = dept_pending.get(dk, 0) + 1
+            uk = (c.urgency or "unknown").lower().title()
+            urgency_pending[uk] = urgency_pending.get(uk, 0) + 1
+
+    # Average review rating for this staff member's resolved complaints
+    rated = [c for c in resolved_complaints if c.review_stars is not None]
+    avg_rating = round(sum(c.review_stars for c in rated) / len(rated), 1) if rated else None
+    total_reviews = len(rated)
+
+    return {
+        "total_complaints":             total,
+        "total_resolved":               resolved,
+        "total_pending":                pending,
+        "high_priority_pending":        high_priority_pending,
+        "resolved_this_week":           resolved_this_week,
+        "department_distribution":      dept_pending,
+        "urgency_pending_distribution": urgency_pending,
+        "avg_rating":                   avg_rating,
+        "total_reviews":                total_reviews,
+    }
+
+// File: auth.py
+import random
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from database import SessionLocal
+import models
+import schemas
+
+import smtplib
+from email.mime.text import MIMEText
+import os
+from dotenv import load_dotenv
+from passlib.context import CryptContext
+
+load_dotenv()
+
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__truncate_error=False
+)
+
+router = APIRouter()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@router.post("/generate-otp")
+def generate_otp(request: schemas.OTPRequest, db: Session = Depends(get_db)):
+    otp = str(random.randint(100000, 999999))
+    expiry = datetime.utcnow() + timedelta(minutes=5)
+
+    otp_entry = models.OTP(
+        email=request.email,
+        otp=otp,
+        expires_at=expiry
+    )
+
+    db.add(otp_entry)
+    db.commit()
+
+    send_email_otp(request.email, otp)
+
+    return {
+        "message": "OTP sent to email"
+    }
+
+
+@router.post("/verify-otp")
+def verify_otp(request: schemas.OTPVerify, db: Session = Depends(get_db)):
+    otp_record = (
+        db.query(models.OTP)
+        .filter(models.OTP.email == request.email)
+        .order_by(models.OTP.id.desc())
+        .first()
+    )
+
+    if not otp_record:
+        raise HTTPException(status_code=400, detail="OTP not found")
+
+    if otp_record.otp != request.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    if otp_record.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    # Check if user exists
+    user = db.query(models.User).filter(models.User.email == request.email).first()
+
+    if not user:
+        user = models.User(email=request.email)
+        db.add(user)
+        db.commit()
+
+    return {"message": "Login successful"}
+
+def send_email_otp(to_email, otp):
+    sender_email = os.getenv("EMAIL_ADDRESS")
+    sender_password = os.getenv("EMAIL_PASSWORD")
+
+    subject = "Your OTP Code"
+    body = f"Your OTP for the ADVS Complaint system is: {otp}"
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = sender_email
+    msg["To"] = to_email
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, to_email, msg.as_string())
+    except Exception as e:
+        print("Email error:", e)
+
+@router.post("/staff/register")
+def register_staff(request: schemas.StaffRegister, db: Session = Depends(get_db)):
+    existing = db.query(models.MaintenanceStaff).filter(
+        models.MaintenanceStaff.staff_id == request.staff_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Staff ID already registered")
+
+    hostel_zone = request.hostel_zone.strip().upper()
+    if hostel_zone not in ("MH", "WH"):
+        raise HTTPException(status_code=400, detail="hostel_zone must be 'MH' or 'WH'")
+
+    block = request.block.strip().upper()
+
+    hashed = pwd_context.hash(request.password)
+    staff = models.MaintenanceStaff(
+        staff_id      = request.staff_id.strip(),
+        name          = request.name.strip(),
+        password_hash = hashed,
+        hostel_zone   = hostel_zone,
+        block         = block,
+    )
+    db.add(staff)
+    db.commit()
+    return {"message": "Staff account created successfully"}
+
+
+@router.post("/staff/login")
+def login_staff(request: schemas.StaffLogin, db: Session = Depends(get_db)):
+    staff = db.query(models.MaintenanceStaff).filter(
+        models.MaintenanceStaff.staff_id == request.staff_id.strip()
+    ).first()
+
+    if not staff:
+        raise HTTPException(status_code=400, detail="Invalid Staff ID or password")
+
+    if not pwd_context.verify(request.password, staff.password_hash):
+        raise HTTPException(status_code=400, detail="Invalid Staff ID or password")
+
+    return {
+        "message":     "Login successful",
+        "staff_id":    staff.staff_id,
+        "name":        staff.name,
+        "hostel_zone": staff.hostel_zone,
+        "block":       staff.block or "",
+    }
+
+@router.patch("/staff/update")
+def update_staff(request: schemas.StaffUpdate, db: Session = Depends(get_db)):
+    staff = db.query(models.MaintenanceStaff).filter(
+        models.MaintenanceStaff.staff_id == request.staff_id.strip()
+    ).first()
+    if not staff:
+        raise HTTPException(status_code=404, detail="Staff not found")
+
+    if request.name is not None:
+        staff.name = request.name.strip()
+    if request.hostel_zone is not None:
+        zone = request.hostel_zone.strip().upper()
+        if zone not in ("MH", "WH"):
+            raise HTTPException(status_code=400, detail="hostel_zone must be 'MH' or 'WH'")
+        staff.hostel_zone = zone
+    if request.block is not None:
+        staff.block = request.block.strip().upper()
+    if request.password is not None and request.password.strip() != "":
+        staff.password_hash = pwd_context.hash(request.password)
+
+    db.commit()
+    db.refresh(staff)
+    return {
+        "message":     "Profile updated",
+        "staff_id":    staff.staff_id,
+        "name":        staff.name,
+        "hostel_zone": staff.hostel_zone,
+        "block":       staff.block or "",
+    }
+
+
+@router.delete("/staff/delete")
+def delete_staff(staff_id: str, db: Session = Depends(get_db)):
+    staff = db.query(models.MaintenanceStaff).filter(
+        models.MaintenanceStaff.staff_id == staff_id.strip()
+    ).first()
+    if not staff:
+        raise HTTPException(status_code=404, detail="Staff not found")
+    db.delete(staff)
+    db.commit()
+    return {"message": "Account deleted"}
+
+
+@router.post("/staff/register-with-otp")
+def register_staff_with_otp(request: schemas.StaffRegisterWithOTP, db: Session = Depends(get_db)):
+    otp_record = (
+        db.query(models.OTP)
+        .filter(models.OTP.email == request.email)
+        .order_by(models.OTP.id.desc())
+        .first()
+    )
+    if not otp_record:
+        raise HTTPException(status_code=400, detail="OTP not found")
+    if otp_record.otp != request.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+    if otp_record.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    existing = db.query(models.MaintenanceStaff).filter(
+        models.MaintenanceStaff.staff_id == request.staff_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Staff ID already registered")
+
+    hostel_zone = request.hostel_zone.strip().upper()
+    if hostel_zone not in ("MH", "WH"):
+        raise HTTPException(status_code=400, detail="hostel_zone must be 'MH' or 'WH'")
+
+    hashed = pwd_context.hash(request.password)
+    staff = models.MaintenanceStaff(
+        staff_id      = request.staff_id.strip(),
+        name          = request.name.strip(),
+        password_hash = hashed,
+        hostel_zone   = hostel_zone,
+        block         = request.block.strip().upper(),
+    )
+    db.add(staff)
+    db.commit()
+    return {"message": "Account created successfully"}
+
+// File: blockchain_service.py
+import hashlib
+
+def generate_complaint_hash(description: str, user_id: int):
+    data = f"{user_id}-{description}"
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+// File: complaints.py
+# complaints.py  —  Complaint submission and retrieval endpoints
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from blockchain_service import generate_complaint_hash
+
+from database import SessionLocal
+import models
+import schemas
+from ml_service import classify_complaint
+
+router = APIRouter()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@router.post("/submit-complaint")
+def submit_complaint(request: schemas.ComplaintCreate, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == request.email).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    department, category, urgency = classify_complaint(request.description)
+    department = department.lower()
+    category = category.lower()
+    urgency = urgency.lower()
+
+    complaint_hash = generate_complaint_hash(request.description, user.id)
+
+    complaint = models.Complaint(
+        user_id         = user.id,
+        room_number     = request.room_number,
+        description     = request.description,
+        department      = department,
+        category        = category,
+        urgency         = urgency,
+        blockchain_hash = complaint_hash,
+    )
+
+    db.add(complaint)
+    db.commit()
+
+    return {
+        "message":     "Complaint submitted",
+        "category":    category,
+        "urgency":     urgency,
+        "department":  department,
+        "room_number": request.room_number,
+    }
+
+
+from typing import Optional
+
+@router.get("/complaints")
+def get_complaints(email: Optional[str] = None, db: Session = Depends(get_db)):
+    if email:
+        user = db.query(models.User).filter(models.User.email == email).first()
+        if not user:
+            return []
+        return db.query(models.Complaint).filter(models.Complaint.user_id == user.id).all()
+    return db.query(models.Complaint).all()
+
+
+@router.get("/complaints/resolved")
+def get_resolved_complaints(staff_id: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(models.Complaint).filter(models.Complaint.status == "completed")
+    if staff_id:
+        query = query.filter(models.Complaint.resolved_by == staff_id)
+    return query.order_by(models.Complaint.id.desc()).all()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Mark a complaint as completed
+#  PATCH /complaints/{complaint_id}/complete
+#
+#  Called by maintenance staff from the Route Planner tab when they finish a
+#  task.  Sets status = "completed".  All other fields are left untouched.
+#  Returns the updated complaint's key fields so the frontend can confirm.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.patch("/complaints/{complaint_id}/complete")
+def mark_complaint_complete(complaint_id: int, staff_id: Optional[str] = None, db: Session = Depends(get_db)):
+    complaint = db.query(models.Complaint).filter(models.Complaint.id == complaint_id).first()
+
+    if not complaint:
+        raise HTTPException(status_code=404, detail=f"Complaint {complaint_id} not found.")
+
+    if complaint.status == "completed":
+        return {
+            "message":      "Already marked as completed.",
+            "complaint_id": complaint.id,
+            "status":       complaint.status,
+        }
+
+    complaint.status      = "completed"
+    complaint.resolved_by = staff_id
+    db.commit()
+    db.refresh(complaint)
+
+    return {
+        "message":      "Complaint marked as completed.",
+        "complaint_id": complaint.id,
+        "status":       complaint.status,
+        "room_number":  complaint.room_number,
+        "category":     complaint.category,
+        "urgency":      complaint.urgency,
+    }
+
+@router.post("/complaints/{complaint_id}/review")
+def submit_review(complaint_id: int, request: schemas.ComplaintReview, db: Session = Depends(get_db)):
+    complaint = db.query(models.Complaint).filter(models.Complaint.id == complaint_id).first()
+    if not complaint:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+    if complaint.status != "completed":
+        raise HTTPException(status_code=400, detail="Can only review completed complaints")
+    if complaint.review_stars is not None:
+        raise HTTPException(status_code=400, detail="Already reviewed")
+    if not (1 <= request.stars <= 5):
+        raise HTTPException(status_code=400, detail="Stars must be between 1 and 5")
+    complaint.review_stars = request.stars
+    complaint.review_text  = (request.text or "").strip() or None
+    db.commit()
+    db.refresh(complaint)
+    return {"message": "Review submitted", "stars": complaint.review_stars}
+
+// File: database.py
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+
+DATABASE_URL = "sqlite:///./smart_hostel.db"
+
+engine = create_engine(
+    DATABASE_URL, connect_args={"check_same_thread": False}
+)
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+Base = declarative_base()
+
+
+// File: dataset.json
+[
+  {"text":"No water in bathroom since morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light in my room flickers constantly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food smells spoiled today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden not responding to emails","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Unauthorized person entered hostel last night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate plays loud music at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff is rude sometimes","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Gas smell near mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet speed is very slow","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Ceiling leaking water pls fix urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Food quality has dropped recently","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard missing at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess timing inconvenient for students","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switch board sparked when I used it","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Cleaning staff skips our floor often","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insects in food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation still not updated","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Water pipe burst near corridor","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food is too oily","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom door lock broken","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi disconnects frequently","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Strange person roaming hostel floor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats same dishes daily","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Electric shock from switchboard","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate not cleaning shared space","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Water heater not working","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Food portion size is small","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire alarm went off randomly","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess area not cleaned properly","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"No electricity since 2 hours urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Fan makes noise but works","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess rice undercooked today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Warden very strict about timings","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Broken window glass dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate snoring loudly lol","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Toilet flush not working","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea tastes bad","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone tried opening my door at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess queue too long everyday","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Water shortage again pls fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dustbins not emptied regularly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food smells weird today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess staff ignores requests","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Lift stuck for few minutes scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allocation confusing","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"AC leaking water","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates not clean properly","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Fire extinguisher missing","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food repetitive and boring","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Socket burnt while charging phone","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Corridor lights too dim","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found hair in food disgusting","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess timings clash with classes","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Unauthorized entry in hostel gate","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate uses my stuff without asking","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Water heater sparks when turned on","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess chutney tastes off","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency exit blocked","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff slow service","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Water not coming in taps since night","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Tube light is too dim to study","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food tastes stale today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden takes too long to approve requests","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Unknown people sitting in hostel lobby","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate keeps AC too cold","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom flooded due to pipe leak","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff not listening properly","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Short circuit happened in corridor","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi signal weak in my room","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food gave me stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu not updated regularly","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire alarm not working","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Cleaning not done properly in rooms","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Electric board making buzzing sound","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate talks loudly on phone at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food served cold","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Stranger tried to enter my room","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess hall very crowded","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Water leakage from ceiling again","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess spoons not cleaned well","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard sleeping at gate","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment delay is frustrating","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Switch sparked when plugging charger","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too spicy daily","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken staircase railing risky","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff ignores hygiene rules","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Toilet flush leaking continuously","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate messy and unhygienic","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"No power backup during outage","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food lacks variety","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Gas cylinder leaking in kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet down since morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room light flickers sometimes","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates smell bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden office closed often","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed broken making noise","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea too watery","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom tiles slippery dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate brings guests frequently","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Electric spark from fan regulator","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue takes too long","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food oily and heavy","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security cameras not working","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room not cleaned regularly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burnt smell from kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess schedule inconvenient","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Plug point loose sparks sometimes","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi slow during evenings","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Hair found in food again","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden rude behavior","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Unknown person entered corridor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate plays games loudly","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Water overflow in bathroom","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert not fresh","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not working","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service slow during rush","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling at all urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust accumulation in rooms","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food undercooked today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation system confusing","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Broken door lock unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu too repetitive","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Electric wire exposed dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate doesn’t switch off lights","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Water heater stopped suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates chipped and old","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stopped working suddenly","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food bland and tasteless","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in washroom","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff not responding properly","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Gas smell near mess area","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate uses loud speaker","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess hygiene needs improvement","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security gate left open at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forgets orders","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"No water supply in washroom since early morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room light is slightly dim","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food tastes weird today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden takes too much time to respond","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Someone unknown roaming near rooms late night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate snores a lot at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Pipe leaking badly in bathroom urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff behavior sometimes rude","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Electrical spark seen near switchboard","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi slow during night hours","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food caused stomach upset","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu not interesting","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire extinguisher missing on floor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Cleaning staff skips some days","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Switch board heating up","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate keeps lights on whole night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food served cold again","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Unknown person knocked my door at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess too crowded during dinner","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan suddenly stopped working","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Ceiling leaking water continuously","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates are not washed properly","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard not present at gate","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allocation still pending","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Socket produced spark while charging","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too salty sometimes","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken glass in corridor risky","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess management not listening","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush not working properly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate very untidy","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power cut without backup urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess lacks food variety","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Gas leakage smell from kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet not working since morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers occasionally","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates smell bad sometimes","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry spotted","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden office timing inconvenient","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed making noise while sleeping","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea very light and watery","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor very slippery","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites friends frequently","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator sparking","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue too slow","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty suddenly again","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food oily most days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV cameras not functioning","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning irregular","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burning smell in mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess schedule clashes with classes","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose plug point causing sparks","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable sometimes","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in food plate","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden not helpful","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger seen inside hostel corridor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate talks loudly late night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflowing water","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert tasted stale","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not working properly","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service slow in peak time","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not working properly urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust in room corners","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation confusing system","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repetitive","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets to switch off fan","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates old and chipped","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stopped suddenly scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food tasteless today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in wash area","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response very slow","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Gas smell strong near mess","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays music loudly","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess cleanliness average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Main gate left open at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders often","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"No water coming in shower since last night pls fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room light slightly flickering but manageable","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food smells really bad today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden never replies on time","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Saw unknown guy roaming near staircase at midnight","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate keeps alarm on snooze for hours","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom pipe leaking heavily urgent attention needed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff not cooperative sometimes","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switchboard gave shock when touched","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Internet speed drops every evening","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Mess food made me feel sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu is very boring these days","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire exit blocked by boxes dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Cleaning staff skipped our floor again","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Electrical socket heating up quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate always on phone loudly","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food always cold by the time we eat","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone tried opening my door late night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess hall overcrowded during lunch","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan suddenly stopped in middle of night","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Ceiling leaking continuously near my bed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates look unclean sometimes","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security missing at hostel gate last night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment still not finalized","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Charging point sparked when plugging laptop","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too salty and oily","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken glass pieces in corridor risky","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff ignores complaints","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush not working properly since yesterday","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate very careless with cleanliness","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power cut with no backup for hours","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess lacks variety in meals","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Gas leakage smell strong in mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet completely down since morning urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers a bit but still works","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess utensils smell bad sometimes","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry happened again","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden office timing very inconvenient","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed makes noise while turning","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea too diluted everyday","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"After eating in the mess I got severe stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"People are getting sick after eating there","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal today made me vomit","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I feel nauseous after eating lunch in mess","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something we ate in the mess was spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Many students fell sick after dinner","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal tasted bad and made me ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got stomach cramps after eating there","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in the mess is making people sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Whatever was served today caused vomiting","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"I think something we ate was contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"After dinner I started feeling very sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was not fresh at all","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Students are getting ill after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch today was definitely spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I vomited after eating in mess","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals served are making us unwell","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner yesterday caused stomach issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal quality is very unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I felt dizzy after eating there","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Eating there regularly is making me sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch tasted off and made me uneasy","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"People are complaining about getting sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal smelled bad and tasted worse","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"After eating I had severe stomach upset","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something served today was clearly spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The dinner was undercooked and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess is causing nausea","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal made multiple people sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got diarrhea after eating in mess","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are a bit bland these days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food is sometimes served cold","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu repeats too often","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Utensils are not always properly cleaned","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Breakfast options are limited","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Dining area feels slightly unhygienic","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Meals lack proper taste","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food smells a bit off sometimes","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Queue is too long during lunch","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Serving counters are not very clean","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"The curry is too watery","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not always fresh","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Mess timing is inconvenient","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Food handling seems careless","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"The tea quality is inconsistent","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Dining tables are not cleaned regularly","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Food quality is average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Meals sometimes feel stale","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Not enough variety in meals","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Mess hygiene needs improvement","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"Chapatis are often hard","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food is occasionally undercooked","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Snacks are repetitive","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Kitchen cleanliness seems questionable","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Meals lack seasoning","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food preparation standards are not consistent","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Dessert options are very limited","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Food smells weird sometimes","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Serving process is slow","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Mess area is not cleaned properly","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are okay but can improve","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food safety could be better","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Too much waiting time in queue","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Utensils sometimes smell bad","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Menu needs more healthy options","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Meals not stored properly","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Food temperature is not consistent","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Dining hall hygiene is not up to mark","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"The dal is too salty","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food preparation area needs cleaning","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are not being prepared properly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something in the meal was definitely bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I feel unwell after eating lunch","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner yesterday tasted weird and caused sickness","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal looked stale and smelled bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating here is making students ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch caused stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not safe to consume","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"After eating I had vomiting issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something we ate was not fresh","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Mess meals are making people sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal served was clearly contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick right after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch tasted sour and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there gave me stomach infection","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The dinner was not hygienic","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Many people felt sick after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was not cooked properly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I felt nauseous after dinner","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something served in mess is making us ill","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are causing stomach issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch today made me feel sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess is unsafe these days","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner smelled rotten","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got food poisoning symptoms after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are contaminated and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something we ate caused illness","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch was not fresh and tasted off","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there gave me nausea","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The dinner was spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are making everyone unwell","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch caused vomiting","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess is giving stomach problems","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was clearly bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick after eating breakfast","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner yesterday made me ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not hygienic at all","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something served caused stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I felt sick after eating dinner","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess caused infection","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lunch was contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals smell bad and taste worse","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I vomited after eating breakfast","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner is making students sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not safe to eat","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something in lunch caused illness","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there is unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal quality is very poor","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got stomach issues after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner caused food poisoning symptoms","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are spoiled and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch today made me feel unwell","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess caused nausea","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner tasted off and made me sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are clearly contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick after eating lunch","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was not fresh","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there made me ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch caused stomach cramps","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are unsafe and unhygienic","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor very slippery dangerous situation","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites friends without asking","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator sparking when used","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue too long takes forever","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty again suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too oily most of the time","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV cameras not working on our floor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning not done regularly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burning smell coming from kitchen area","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess schedule clashes with lectures","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose socket causing sparks frequently","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable during peak hours","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in mess food again disgusting","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden not taking issues seriously","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger seen walking inside hostel corridor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate watches videos loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflowing due to clog","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert tasted stale today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not functioning","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service slow during dinner rush","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling at all urgent fix needed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust buildup in corners of room","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked again today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation process confusing","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken feels unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats every week","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring near corridor dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets to turn off lights","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working suddenly today","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates are chipped and old","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stopped suddenly and got stuck","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food very bland these days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in washroom area urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response very slow to issues","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Strong gas smell near mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays loud songs late night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly might break","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess cleanliness not up to mark","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Main gate left open late night unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders often annoying","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"No water in washroom again since morning urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light brightness is low but manageable","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food smells rotten today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden delays approvals unnecessarily","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Unknown person seen near hostel gate at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate talks loudly while gaming","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom tap leaking continuously urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff not polite sometimes","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switchboard sparked when turned on","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi very slow during evening time","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food tasted bad and made me uneasy","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu too repetitive","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire exit locked which is unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room not cleaned regularly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Socket heating while charging phone","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate keeps lights on always","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food served cold frequently","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone knocked my door late night suspicious","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess area too crowded daily","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Ceiling leaking water near study table urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess utensils not properly cleaned","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard missing during night shift","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment still pending","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Charging socket loose and sparking","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too oily and spicy","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken glass pieces lying in hallway","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess complaints not being addressed","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush not working properly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate very untidy and careless","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power outage without backup urgent fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food lacks variety nowadays","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Gas leak smell coming from kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet not working since morning urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers occasionally in room","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates smell bad sometimes","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry seen again","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden not available during office hours","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed makes noise while sleeping","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea too watery daily","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor slippery causing risk","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites friends frequently","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator sparking when adjusted","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue takes too long everyday","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty suddenly again","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food oily most of the time","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV cameras not working properly","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning not consistent","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burning smell from mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess timing clashes with classes","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose socket causing sparks repeatedly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable at times","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in food again very bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden not helpful in resolving issues","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger seen inside hostel corridor at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate watches videos loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflow due to blockage urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert stale today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not functioning properly","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service slow during peak time","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling at all urgent repair needed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust accumulation in room corners","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked again","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation system confusing","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken unsafe condition","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats too often","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring in corridor dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets to turn off lights","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates chipped and old","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stuck for few minutes very scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food bland these days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in washroom urgent repair needed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response too slow","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Strong gas smell near mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays loud music late night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess cleanliness not satisfactory","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Main gate left open at night unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders frequently","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Water supply stopped suddenly in evening urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room fan speed is slightly low","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food smells off today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden not available when needed","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger seen near hostel entrance at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate keeps window open always","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Pipe leaking under sink urgent repair","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff talking rudely sometimes","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switchboard making crackling sound","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi disconnects randomly","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food caused stomach ache today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu very repetitive","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Emergency exit blocked by furniture","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning not done properly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Socket sparks when plug inserted","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate sleeps with lights on","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food cold most of the time","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone tried opening door late night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess seating insufficient","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan stopped suddenly at night","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Water dripping from ceiling continuously","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates sometimes dirty","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard absent during late hours","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment not updated","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Loose wire near switch dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food too spicy daily","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken railing in staircase risky","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess complaints ignored","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush leaking continuously","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate messy and noisy","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power outage without backup urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food lacks taste","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gas smell near mess area","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet down completely since morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers occasionally","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess utensils smell bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry seen again","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden office closed frequently","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed making noise while sleeping","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea too watery","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor slippery very risky","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites friends too often","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator sparking","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue very long","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too oily","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV not working on floor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room not cleaned regularly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burn smell from mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess schedule inconvenient","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose socket sparks frequently","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable at times","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden ignores complaints","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger walking inside hostel","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate talks loudly","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflow urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert stale","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not working","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service slow","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling urgent fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust accumulation in room","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation confusing","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats weekly","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets lights","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates chipped","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stuck briefly scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food bland","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst urgent repair","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response slow","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Gas smell strong near kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays loud music","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess hygiene average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gate left open at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders","priority":"Low","department":"Mess","category":"Administrative"},
+  
+  {"text":"No water in taps since afternoon urgent pls","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room light a bit dull but ok","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dal smells weird today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden office closed during working hours","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Unknown guy tried entering hostel gate late night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate keeps talking loudly on calls","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom pipe burst suddenly water everywhere","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff not responding properly","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switch gave shock when i touched it","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi speed very low at night","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food tasted spoiled today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu too repetitive and boring","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire alarm not working on our floor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Cleaning not done properly this week","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Socket sparks when charger plugged","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate keeps door open always","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food always cold by dinner time","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone knocked my door late night and ran","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess hall too crowded during lunch","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan stopped working suddenly at night","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Water leaking from ceiling near fan","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates sometimes oily","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard missing from main gate","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment still not confirmed","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Loose wiring near switch dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food too spicy most days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken railing on stairs very risky","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess complaints ignored by staff","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush leaking continuously in bathroom","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate messy and doesnt clean","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power cut no backup for hours urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food not tasty these days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gas smell near kitchen area","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet completely down since morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers sometimes","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess utensils smell bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry happened again","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden not available during office time","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed making noise while turning","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea too light","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor slippery dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites friends without informing","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator sparking when used","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue takes too long","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty suddenly again","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too oily everyday","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV cameras not working on floor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning irregular","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burn smell coming from kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess schedule not convenient","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose plug point causing sparks","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable in evenings","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in food again disgusting","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden ignores student issues","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger walking inside hostel corridor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate talks loudly late night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflow due to blockage","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert stale today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not functioning","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service slow during rush","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling properly urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust in room corners","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked again today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation confusing process","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken feels unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats often","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring near wall dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets to switch off lights","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates chipped and old","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are a bit bland these days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food is sometimes served cold","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu repeats too often","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Utensils are not always properly cleaned","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Breakfast options are limited","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Dining area feels slightly unhygienic","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Meals lack proper taste","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food smells a bit off sometimes","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Queue is too long during lunch","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Serving counters are not very clean","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"The curry is too watery","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not always fresh","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Mess timing is inconvenient","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Food handling seems careless","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"The tea quality is inconsistent","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Dining tables are not cleaned regularly","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Food quality is average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Meals sometimes feel stale","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Not enough variety in meals","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Mess hygiene needs improvement","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"Chapatis are often hard","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food is occasionally undercooked","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Snacks are repetitive","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Kitchen cleanliness seems questionable","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Meals lack seasoning","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food preparation standards are not consistent","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Dessert options are very limited","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Food smells weird sometimes","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Serving process is slow","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Mess area is not cleaned properly","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are okay but can improve","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food safety could be better","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Too much waiting time in queue","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Utensils sometimes smell bad","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Menu needs more healthy options","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Meals not stored properly","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"Food temperature is not consistent","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Dining hall hygiene is not up to mark","priority":"Medium","department":"Mess","category":"Maintenance"},
+  {"text":"The dal is too salty","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Food preparation area needs cleaning","priority":"Medium","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stuck for few mins scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food bland these days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in washroom urgent fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response very slow","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Strong gas smell near mess","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays music loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess hygiene average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gate left open at night unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders often","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"No water coming in bathroom since midnight urgent fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room light not bright enough for studying","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food tastes sour today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden never replies to calls","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Unknown person loitering near hostel rooms","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate keeps fan on full speed always","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom sink pipe leaking heavily","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff ignoring complaints","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switchboard sparked loudly when used","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi drops connection randomly","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food smelled rotten today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu same every week","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire alarm system not functioning","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning skipped for days","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Socket overheating when used","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate talks loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food served cold always","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone knocked door and ran away","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess hall overcrowded daily","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan stopped working suddenly at night","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Water dripping from ceiling nonstop","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess utensils not cleaned well","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard absent late night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment delayed again","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Loose wire hanging near switchboard","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food too salty","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken railing in corridor dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess complaints not taken seriously","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush not working properly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate leaves room messy","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power outage without backup again urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food lacks flavor","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gas smell detected in mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet not working since morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers sometimes in room","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates smell odd","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry seen at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden unavailable during office hours","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed creaks loudly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea very diluted","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor extremely slippery","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites guests too often","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator making sparks","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue too long everyday","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty without notice","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too oily and heavy","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV not working in corridor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning irregular","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burn smell from kitchen area","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess schedule inconvenient","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose socket sparking repeatedly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable frequently","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in mess food again","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden ignores complaints","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger walking inside hostel at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate talks loudly during calls","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflow due to blockage urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert stale today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not working","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service very slow","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling properly urgent repair","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust buildup in room corners","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked again","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation confusing process","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats every week","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring near wall dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets to switch off lights","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates chipped and old","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stuck for few minutes very scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food bland nowadays","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in washroom urgent fix needed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response very slow","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Strong gas smell near mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays music loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess hygiene average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gate left open at night unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders often","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"No water coming in bathroom since midnight urgent fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room light not bright enough for studying","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food tastes sour today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden never replies to calls","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Unknown person loitering near hostel rooms","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate keeps fan on full speed always","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom sink pipe leaking heavily","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff ignoring complaints","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switchboard sparked loudly when used","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi drops connection randomly","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food smelled rotten today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu same every week","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire alarm system not functioning","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning skipped for days","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Socket overheating when used","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate talks loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food served cold always","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone knocked door and ran away","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess hall overcrowded daily","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan stopped working suddenly at night","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Water dripping from ceiling nonstop","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess utensils not cleaned well","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard absent late night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment delayed again","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Loose wire hanging near switchboard","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food too salty","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken railing in corridor dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess complaints not taken seriously","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush not working properly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate leaves room messy","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power outage without backup again urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food lacks flavor","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gas smell detected in mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet not working since morning","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers sometimes in room","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates smell odd","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry seen at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden unavailable during office hours","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed creaks loudly","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea very diluted","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor extremely slippery","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites guests too often","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator making sparks","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue too long everyday","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty without notice","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food too oily and heavy","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV not working in corridor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning irregular","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burn smell from kitchen area","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess schedule inconvenient","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose socket sparking repeatedly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable frequently","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in mess food again","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden ignores complaints","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger walking inside hostel at night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate talks loudly during calls","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflow due to blockage urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert stale today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not working","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service very slow","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling properly urgent repair","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust buildup in room corners","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked again","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation confusing process","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats every week","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring near wall dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets to switch off lights","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates chipped and old","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stuck for few minutes very scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food bland nowadays","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in washroom urgent fix needed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response very slow","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Strong gas smell near mess kitchen","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays music loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess hygiene average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gate left open at night unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders often","priority":"Low","department":"Mess","category":"Administrative"},
+  
+  {"text":"No water since morning in our block pls fix asap","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Room light kinda dim, hard to read at night","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food smells rotten today, cant eat this","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden takes days to reply mails","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Saw unknown person near rooms at 2am very unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate keeps talking on phone loudly","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom pipe burst water everywhere urgent help","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess staff not listening properly","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Switchboard sparked when i plugged charger","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi slow in evenings","priority":"Low","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Food tasted spoiled today made me sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess menu repeats every week boring","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fire alarm not working in hostel","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room not cleaned properly for days","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Socket getting hot when used","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate leaves lights on whole night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Mess food always cold","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Someone tried opening my door late night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess hall too crowded","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Fan suddenly stopped working","priority":"High","department":"Hostel","category":"Maintenance"},
+
+  {"text":"Water leaking from ceiling onto bed urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates look dirty sometimes","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Security guard missing at gate last night","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room allotment still not done","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Loose wire near switch very dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food too spicy everyday","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Broken railing in staircase risky","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess complaints ignored by management","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Flush leaking continuously","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Roommate messy doesnt clean","priority":"Low","department":"Hostel","category":"Residential"},
+
+  {"text":"Power cut no backup since hours urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food not tasty anymore","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gas smell coming from kitchen area","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Internet down since morning urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Light flickers sometimes","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess utensils smell weird","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Unauthorized entry seen again in hostel","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Warden not available during office time","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Bed makes noise while sleeping","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess tea too watery daily","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Bathroom floor slippery almost fell","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate invites friends often","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan regulator sparking","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess queue too long everyday","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Water tank empty suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess food oily most days","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"CCTV not working in our floor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Room cleaning irregular","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Burn smell from kitchen today","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Mess timing not convenient","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"Loose socket sparking repeatedly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"WiFi unstable sometimes","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Found insect in food disgusting","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Warden ignores complaints","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Stranger walking inside hostel corridor","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate talks loudly at night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Bathroom overflow due to clog urgent","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess dessert stale today","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Emergency lights not working","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess service slow during rush","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"AC not cooling urgent repair needed","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Dust in room corners","priority":"Low","department":"Hostel","category":"Maintenance"},
+  {"text":"Food undercooked again","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Room allocation confusing system","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Door lock broken unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess menu repeats often","priority":"Low","department":"Mess","category":"Administrative"},
+  {"text":"Exposed wiring near wall dangerous","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Roommate forgets lights on","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Heater stopped working suddenly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess plates chipped","priority":"Low","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lift stuck for few minutes scary","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess food bland nowadays","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Pipe burst in washroom urgent fix","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Staff response slow","priority":"Low","department":"Hostel","category":"Administrative"},
+  {"text":"Strong gas smell near mess","priority":"High","department":"Mess","category":"Safety"},
+  {"text":"Roommate plays loud music late night","priority":"Low","department":"Hostel","category":"Residential"},
+  {"text":"Fan overheating quickly","priority":"High","department":"Hostel","category":"Maintenance"},
+  {"text":"Mess hygiene average","priority":"Low","department":"Mess","category":"Maintenance"},
+  {"text":"Gate left open at night unsafe","priority":"High","department":"Hostel","category":"Safety"},
+  {"text":"Mess staff forget orders often","priority":"Low","department":"Mess","category":"Administrative"},
+
+  {"text":"The mess food is giving people food poisoning","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I think the food served today caused food poisoning","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Several students got sick after eating in the mess","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food quality is so bad it's making us ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is contaminated and unsafe to eat","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got stomach pain after eating mess food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food in the mess seems spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Many students are falling sick after meals","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food hygiene is very poor, people are getting sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food tastes bad and caused vomiting","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"I suspect the mess food is not fresh","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food served today smelled rotten","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is causing health issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"After eating in mess I feel nauseous","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food quality is extremely unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"There is something wrong with the food being served","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess meals are making students ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food smells spoiled and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Got food poisoning symptoms after lunch","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is unhygienic","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"The food today tasted off and I feel sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food in the mess is not properly cooked","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food hygiene is terrible","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Students are reporting sickness after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food seems contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The mess is serving bad quality food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I fell sick after eating dinner in mess","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food looks stale and smells weird","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food caused stomach infection","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food quality is dangerously low","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"I got diarrhea after eating mess food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is not safe to consume","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess kitchen hygiene seems poor","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food served is not fresh at all","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I think the food was spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is making people sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is undercooked and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Many students complained about sickness","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food tastes sour and bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food served is not hygienic","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"I feel sick after eating mess food regularly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is causing stomach issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food seems improperly stored","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is not cooked properly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food gave me food poisoning symptoms","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I vomited after eating mess lunch","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is clearly spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess hygiene is extremely poor","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food smells like it has gone bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"The food made me sick today","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food quality has become dangerous","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food served is stale","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I had stomach cramps after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is making everyone ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food hygiene standards are not maintained","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is not edible","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is low quality and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food smells and tastes off","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Students are getting sick from food","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"The food is clearly not fresh","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick after eating mess dinner","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food is not being handled properly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The mess is serving spoiled food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is causing nausea","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food hygiene is unacceptable","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food looks and smells bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I suspect food poisoning from mess","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is not safe to eat","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Mess food is causing illness among students","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food tastes spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Hygiene in mess is very poor","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I feel unwell after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food quality is horrible","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is making people vomit","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food is not cooked properly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The mess is not maintaining hygiene","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food is unsafe and unhealthy","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Students are complaining about sickness","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"The food is contaminated and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food smells rotten","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick after eating breakfast","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food is not fresh at all","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The mess is serving bad food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food quality is unacceptable","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food caused stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is unhygienic","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I feel like I got food poisoning","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is dangerous","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"The food is clearly spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got nausea after eating mess food","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess hygiene is poor and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food tastes bad and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Students are falling sick frequently","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is not safe to eat","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food is making me sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Food quality is very poor","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Mess food is contaminated and unhygienic","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The food served is causing illness","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"After eating in the mess I got severe stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"People are getting sick after eating there","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal today made me vomit","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I feel nauseous after eating lunch in mess","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something we ate in the mess was spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Many students fell sick after dinner","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal tasted bad and made me ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got stomach cramps after eating there","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in the mess is making people sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Whatever was served today caused vomiting","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"I think something we ate was contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"After dinner I started feeling very sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was not fresh at all","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Students are getting ill after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch today was definitely spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I vomited after eating in mess","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals served are making us unwell","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner yesterday caused stomach issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal quality is very unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I felt dizzy after eating there","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Eating there regularly is making me sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch tasted off and made me uneasy","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"People are complaining about getting sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal smelled bad and tasted worse","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"After eating I had severe stomach upset","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something served today was clearly spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The dinner was undercooked and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess is causing nausea","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal made multiple people sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got diarrhea after eating in mess","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are not being prepared properly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something in the meal was definitely bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I feel unwell after eating lunch","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner yesterday tasted weird and caused sickness","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal looked stale and smelled bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating here is making students ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch caused stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not safe to consume","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"After eating I had vomiting issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something we ate was not fresh","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Mess meals are making people sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal served was clearly contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick right after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch tasted sour and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there gave me stomach infection","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The dinner was not hygienic","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Many people felt sick after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was not cooked properly","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I felt nauseous after dinner","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something served in mess is making us ill","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are causing stomach issues","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch today made me feel sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess is unsafe these days","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner smelled rotten","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got food poisoning symptoms after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are contaminated and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something we ate caused illness","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch was not fresh and tasted off","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there gave me nausea","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The dinner was spoiled","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are making everyone unwell","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The lunch caused vomiting","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess is giving stomach problems","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was clearly bad","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick after eating breakfast","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner yesterday made me ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not hygienic at all","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something served caused stomach pain","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I felt sick after eating dinner","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess caused infection","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Lunch was contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals smell bad and taste worse","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I vomited after eating breakfast","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner is making students sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are not safe to eat","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Something in lunch caused illness","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there is unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal quality is very poor","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got stomach issues after eating","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner caused food poisoning symptoms","priority":"High","department":"Mess","category":"Maintenance"},
+
+  {"text":"Meals are spoiled and unsafe","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch today made me feel unwell","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating in mess caused nausea","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Dinner tasted off and made me sick","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are clearly contaminated","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"I got sick after eating lunch","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"The meal was not fresh","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Eating there made me ill","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Lunch caused stomach cramps","priority":"High","department":"Mess","category":"Maintenance"},
+  {"text":"Meals are unsafe and unhygienic","priority":"High","department":"Mess","category":"Maintenance"}
+]
+
+// File: main.py
+# main.py  —  FastAPI application entry point
+
+from fastapi import FastAPI
+from database import engine, Base
+from fastapi.middleware.cors import CORSMiddleware
+
+import models
+from auth import router as auth_router
+from complaints import router as complaint_router
+from analytics import router as analytics_router
+from routing_service import router as routing_router          
+
+app = FastAPI(title="ADVS Smart Hostel System")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+Base.metadata.create_all(bind=engine)
+
+app.include_router(auth_router)
+app.include_router(complaint_router)
+app.include_router(analytics_router)
+app.include_router(routing_router)                         
+
+
+@app.get("/")
+def root():
+    return {"message": "ADVS Smart Hostel Backend Running"}
+
+
+// File: ml_service.py
+import joblib
+
+priority_model = joblib.load("priority_model.pkl")
+department_model = joblib.load("department_model.pkl")
+category_model = joblib.load("category_model.pkl")
+
+def classify_complaint(text: str):
+    priority = priority_model.predict([text])[0]
+    department = department_model.predict([text])[0]
+    category = category_model.predict([text])[0]
+
+    return department, category, priority
+
+// File: models.py
+# models.py  —  SQLAlchemy models for ADVS Smart Hostel System
+
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy.sql import func
+from database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    email      = Column(String(255), unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class OTP(Base):
+    __tablename__ = "otp_codes"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    email      = Column(String(255))
+    otp        = Column(String(6))
+    expires_at = Column(DateTime)
+
+
+class Complaint(Base):
+    __tablename__ = "complaints"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    user_id          = Column(Integer, ForeignKey("users.id"))
+    room_number      = Column(String(20), nullable=True)   
+    description      = Column(Text)
+    department       = Column(String(50))
+    category         = Column(String(100))
+    urgency          = Column(String(50))
+    blockchain_hash  = Column(String(255))
+    status           = Column(String(50), default="pending")
+    resolved_by      = Column(String(50), nullable=True)
+    review_stars     = Column(Integer,    nullable=True)
+    review_text      = Column(Text,       nullable=True)
+    created_at       = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class MaintenanceStaff(Base):
+    __tablename__ = "maintenance_staff"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    staff_id     = Column(String(50), unique=True, index=True)
+    name         = Column(String(100))
+    password_hash = Column(String(255))
+    hostel_zone  = Column(String(10))   # "MH" or "WH"
+    block        = Column(String(5), nullable=True)   # e.g. "Q", "R", "A"
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+
+// File: routing_service.py
+# =============================================================================
+#  routing_service.py  —  VIT Hostel Hybrid Spatial Routing Engine
+#  Author: ADVS Smart Hostel System
+#
+#  Architecture:
+#    Outside-block distance  →  Real data from Excel distance matrices
+#    Inside-block distance   →  Topological math from room number parsing
+#    Total cost              =  outside_dist + (Δfloor × FLOOR_W) + (Δroom × ROOM_W)
+#
+#  HARD CONSTRAINT: MH staff never cross into WH blocks and vice-versa.
+# =============================================================================
+
+from __future__ import annotations
+from typing import Optional
+import re
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 1 — TOPOLOGY WEIGHTS
+#  Tune these to reflect actual walking effort at VIT.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FLOOR_WEIGHT = 30   # cost (metres-equivalent) per floor climbed / descended
+ROOM_WEIGHT  = 3    # cost per room number delta along a corridor
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 2 — MEN'S HOSTEL (MH) DISTANCE MATRIX
+#  Blocks: A B C D E F G H J K L M N P Q R T
+#  Source: Men_s_Hostel_Block_Distance_Matrices.xlsx (actual distances, metres)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MH_BLOCKS = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'T'}
+
+MH_DISTANCE: dict[str, dict[str, float]] = {
+    'A': {'A':    0, 'B':   60, 'C':  120, 'D':  180, 'E':  250, 'F':  300,
+          'G':  450, 'H':  500, 'J':  550, 'K':  600, 'L':  650, 'M':  800,
+          'N':  850, 'P':  900, 'Q': 1100, 'R': 1200, 'T': 1500},
+
+    'B': {'A':   60, 'B':    0, 'C':   60, 'D':  120, 'E':  190, 'F':  240,
+          'G':  390, 'H':  440, 'J':  490, 'K':  540, 'L':  590, 'M':  740,
+          'N':  790, 'P':  840, 'Q': 1040, 'R': 1140, 'T': 1440},
+
+    'C': {'A':  120, 'B':   60, 'C':    0, 'D':   80, 'E':  150, 'F':  200,
+          'G':  350, 'H':  400, 'J':  450, 'K':  500, 'L':  550, 'M':  700,
+          'N':  750, 'P':  800, 'Q': 1000, 'R': 1100, 'T': 1400},
+
+    'D': {'A':  180, 'B':  120, 'C':   80, 'D':    0, 'E':   70, 'F':  120,
+          'G':  270, 'H':  320, 'J':  370, 'K':  420, 'L':  470, 'M':  620,
+          'N':  670, 'P':  720, 'Q':  920, 'R': 1020, 'T': 1320},
+
+    'E': {'A':  250, 'B':  190, 'C':  150, 'D':   70, 'E':    0, 'F':   60,
+          'G':  200, 'H':  250, 'J':  300, 'K':  350, 'L':  400, 'M':  550,
+          'N':  600, 'P':  650, 'Q':  850, 'R':  950, 'T': 1250},
+
+    'F': {'A':  300, 'B':  240, 'C':  200, 'D':  120, 'E':   60, 'F':    0,
+          'G':  150, 'H':  200, 'J':  250, 'K':  300, 'L':  350, 'M':  500,
+          'N':  550, 'P':  600, 'Q':  800, 'R':  900, 'T': 1200},
+
+    'G': {'A':  450, 'B':  390, 'C':  350, 'D':  270, 'E':  200, 'F':  150,
+          'G':    0, 'H':   60, 'J':  110, 'K':  160, 'L':  210, 'M':  350,
+          'N':  400, 'P':  450, 'Q':  650, 'R':  750, 'T': 1050},
+
+    'H': {'A':  500, 'B':  440, 'C':  400, 'D':  320, 'E':  250, 'F':  200,
+          'G':   60, 'H':    0, 'J':   50, 'K':  100, 'L':  150, 'M':  300,
+          'N':  350, 'P':  400, 'Q':  600, 'R':  700, 'T': 1000},
+
+    'J': {'A':  550, 'B':  490, 'C':  450, 'D':  370, 'E':  300, 'F':  250,
+          'G':  110, 'H':   50, 'J':    0, 'K':   50, 'L':  100, 'M':  250,
+          'N':  300, 'P':  350, 'Q':  550, 'R':  650, 'T':  950},
+
+    'K': {'A':  600, 'B':  540, 'C':  500, 'D':  420, 'E':  350, 'F':  300,
+          'G':  160, 'H':  100, 'J':   50, 'K':    0, 'L':   60, 'M':  200,
+          'N':  250, 'P':  300, 'Q':  500, 'R':  600, 'T':  900},
+
+    'L': {'A':  650, 'B':  590, 'C':  550, 'D':  470, 'E':  400, 'F':  350,
+          'G':  210, 'H':  150, 'J':  100, 'K':   60, 'L':    0, 'M':  150,
+          'N':  200, 'P':  250, 'Q':  450, 'R':  550, 'T':  850},
+
+    'M': {'A':  800, 'B':  740, 'C':  700, 'D':  620, 'E':  550, 'F':  500,
+          'G':  350, 'H':  300, 'J':  250, 'K':  200, 'L':  150, 'M':    0,
+          'N':   60, 'P':  110, 'Q':  300, 'R':  400, 'T':  700},
+
+    'N': {'A':  850, 'B':  790, 'C':  750, 'D':  670, 'E':  600, 'F':  550,
+          'G':  400, 'H':  350, 'J':  300, 'K':  250, 'L':  200, 'M':   60,
+          'N':    0, 'P':   60, 'Q':  250, 'R':  350, 'T':  650},
+
+    'P': {'A':  900, 'B':  840, 'C':  800, 'D':  720, 'E':  650, 'F':  600,
+          'G':  450, 'H':  400, 'J':  350, 'K':  300, 'L':  250, 'M':  110,
+          'N':   60, 'P':    0, 'Q':  200, 'R':  300, 'T':  600},
+
+    'Q': {'A': 1100, 'B': 1040, 'C': 1000, 'D':  920, 'E':  850, 'F':  800,
+          'G':  650, 'H':  600, 'J':  550, 'K':  500, 'L':  450, 'M':  300,
+          'N':  250, 'P':  200, 'Q':    0, 'R':  100, 'T':  400},
+
+    'R': {'A': 1200, 'B': 1140, 'C': 1100, 'D': 1020, 'E':  950, 'F':  900,
+          'G':  750, 'H':  700, 'J':  650, 'K':  600, 'L':  550, 'M':  400,
+          'N':  350, 'P':  300, 'Q':  100, 'R':    0, 'T':  300},
+
+    'T': {'A': 1500, 'B': 1440, 'C': 1400, 'D': 1320, 'E': 1250, 'F': 1200,
+          'G': 1050, 'H': 1000, 'J':  950, 'K':  900, 'L':  850, 'M':  700,
+          'N':  650, 'P':  600, 'Q':  400, 'R':  300, 'T':    0},
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 3 — WOMEN'S HOSTEL (WH) DISTANCE MATRIX
+#  Blocks: A B C D E F G H J S
+#  Source: Ladies_Hostel_Block_Distance_Matrices.xlsx (actual distances, metres)
+#  Note:   Block S has 10000 m to all other blocks — it is a standalone/
+#          isolated block that must be treated as a direct-dispatch only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+WH_BLOCKS = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'S'}
+
+WH_DISTANCE: dict[str, dict[str, float]] = {
+    'A': {'A':     0, 'B':    40, 'C':   100, 'D':   150, 'E':   250,
+          'F':   300, 'G':   450, 'H':   600, 'J':   700, 'S': 10000},
+
+    'B': {'A':    40, 'B':     0, 'C':    60, 'D':   110, 'E':   210,
+          'F':   260, 'G':   410, 'H':   560, 'J':   660, 'S': 10000},
+
+    'C': {'A':   100, 'B':    60, 'C':     0, 'D':    50, 'E':   150,
+          'F':   200, 'G':   350, 'H':   500, 'J':   600, 'S': 10000},
+
+    'D': {'A':   150, 'B':   110, 'C':    50, 'D':     0, 'E':   100,
+          'F':   150, 'G':   300, 'H':   450, 'J':   550, 'S': 10000},
+
+    'E': {'A':   250, 'B':   210, 'C':   150, 'D':   100, 'E':     0,
+          'F':    50, 'G':   200, 'H':   350, 'J':   450, 'S': 10000},
+
+    'F': {'A':   300, 'B':   260, 'C':   200, 'D':   150, 'E':    50,
+          'F':     0, 'G':   150, 'H':   300, 'J':   400, 'S': 10000},
+
+    'G': {'A':   450, 'B':   410, 'C':   350, 'D':   300, 'E':   200,
+          'F':   150, 'G':     0, 'H':   150, 'J':   250, 'S': 10000},
+
+    'H': {'A':   600, 'B':   560, 'C':   500, 'D':   450, 'E':   350,
+          'F':   300, 'G':   150, 'H':     0, 'J':   100, 'S': 10000},
+
+    'J': {'A':   700, 'B':   660, 'C':   600, 'D':   550, 'E':   450,
+          'F':   400, 'G':   250, 'H':   100, 'J':     0, 'S': 10000},
+
+    'S': {'A': 10000, 'B': 10000, 'C': 10000, 'D': 10000, 'E': 10000,
+          'F': 10000, 'G': 10000, 'H': 10000, 'J': 10000, 'S':     0},
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 4 — STAFF TYPE CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+STAFF_MH = "MH"   # Men's Hostel staff
+STAFF_WH = "WH"   # Women's Hostel staff
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 5 — ROOM NUMBER PARSER
+#
+#  VIT room format:  <Block>-<Floor><Room>
+#  Examples:         Q-415  →  Block Q, Floor 4, Room 15
+#                    A-101  →  Block A, Floor 1, Room 01
+#                    T-305  →  Block T, Floor 3, Room 05
+#
+#  The parser handles single-letter blocks (A-T, no I or O to avoid confusion)
+#  and 3-digit room codes where the first digit is the floor.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RoomLocation:
+    """Parsed room location from a VIT room string like 'Q-415'."""
+
+    def __init__(self, block: str, floor: int, room_num: int, raw: str):
+        self.block    = block.upper()
+        self.floor    = floor
+        self.room_num = room_num
+        self.raw      = raw  # original string, for display
+
+    def __repr__(self) -> str:
+        return f"RoomLocation(block={self.block}, floor={self.floor}, room={self.room_num})"
+
+
+def parse_room(room_str: str) -> Optional[RoomLocation]:
+    """
+    Parse a VIT hostel room string into a RoomLocation.
+
+    Accepted formats:
+        Q-415     →  block=Q, floor=4, room=15
+        Q415      →  block=Q, floor=4, room=15
+        q-415     →  case-insensitive
+        WH-Q-415  →  strips zone prefix
+
+    Returns None if the string cannot be parsed.
+    """
+    if not room_str:
+        return None
+
+    # Normalise and strip zone prefixes like "MH-" or "WH-"
+    s = room_str.strip().upper()
+    s = re.sub(r'^(MH|WH)-', '', s)
+
+    # Match: one letter, optional dash, 3 digits
+    m = re.fullmatch(r'([A-Z])-?(\d{1,2})(\d{2})', s)
+    if not m:
+        return None
+
+    block    = m.group(1)
+    floor    = int(m.group(2))
+    room_num = int(m.group(3))
+
+    return RoomLocation(block=block, floor=floor, room_num=room_num, raw=room_str)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 6 — ZONE CLASSIFIER
+#  Decides which distance matrix to use and validates block membership.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_zone(block: str) -> Optional[str]:
+    """
+    Return 'MH' if the block belongs to Men's Hostel,
+    'WH' if it belongs to Women's Hostel,
+    None if unrecognised.
+
+    Note: Both zones share block letters A-J.  The disambiguator is the
+    STAFF_TYPE attached to each complaint (set at login time).
+    The zone is therefore always resolved from staff_type, never from
+    block letter alone.
+    """
+    b = block.upper()
+    if b in MH_BLOCKS:
+        return STAFF_MH
+    if b in WH_BLOCKS:
+        return STAFF_WH
+    return None
+
+
+def get_distance_matrix(staff_type: str) -> dict[str, dict[str, float]]:
+    """Return the correct distance matrix for the given staff type."""
+    if staff_type == STAFF_MH:
+        return MH_DISTANCE
+    if staff_type == STAFF_WH:
+        return WH_DISTANCE
+    raise ValueError(f"Unknown staff_type '{staff_type}'. Must be 'MH' or 'WH'.")
+
+
+def get_block_set(staff_type: str) -> set[str]:
+    """Return the set of valid blocks for the given staff type."""
+    if staff_type == STAFF_MH:
+        return MH_BLOCKS
+    if staff_type == STAFF_WH:
+        return WH_BLOCKS
+    raise ValueError(f"Unknown staff_type '{staff_type}'.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 7 — TOPOLOGICAL DISTANCE FORMULA
+#
+#  total_cost = outside_block_distance
+#             + (|floor_a - floor_b| × FLOOR_WEIGHT)
+#             + (|room_a  - room_b|  × ROOM_WEIGHT)
+#
+#  If the worker is already in the same block, outside_block_distance = 0.
+#  All three components use the same metre-equivalent unit so they can
+#  be added directly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def topological_distance(
+    origin: RoomLocation,
+    target: RoomLocation,
+    staff_type: str,
+) -> float:
+    """
+    Compute the hybrid topological cost from origin room to target room.
+
+    Parameters
+    ----------
+    origin     : worker's current room (parsed)
+    target     : task destination room (parsed)
+    staff_type : 'MH' or 'WH'
+
+    Returns
+    -------
+    float  cost in metre-equivalents (lower = faster to reach)
+    """
+    matrix = get_distance_matrix(staff_type)
+
+    # --- Outside-block distance ---
+    # If blocks differ, look up real distance from the matrix.
+    # If either block is missing from the matrix, fall back to a large penalty
+    # so the task is deprioritised rather than causing a KeyError.
+    if origin.block == target.block:
+        outside_dist = 0.0
+    else:
+        try:
+            outside_dist = matrix[origin.block][target.block]
+        except KeyError:
+            outside_dist = 99999.0   # unknown block → lowest priority
+
+    # --- Inside-block (topological) distance ---
+    floor_cost = abs(origin.floor - target.floor) * FLOOR_WEIGHT
+    room_cost  = abs(origin.room_num - target.room_num) * ROOM_WEIGHT
+
+    return outside_dist + floor_cost + room_cost
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 8 — MAIN ROUTING ALGORITHM
+#
+#  calculate_optimal_route:
+#    1. Filter tasks to the correct hostel zone (MH/WH firewall).
+#    2. Separate CRITICAL urgency tasks → always at the top.
+#    3. Sort remaining tasks by topological_distance from current location.
+#    4. Combine: [critical tasks sorted by distance] + [normal tasks sorted].
+#    5. Return enriched task list with cost annotations.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calculate_optimal_route(
+    current_location_str: str,
+    pending_tasks: list[dict],
+    staff_type: str,
+) -> list[dict]:
+    """
+    Sort pending maintenance tasks into an optimal walking route for a worker.
+
+    Parameters
+    ----------
+    current_location_str : worker's current room, e.g. "Q-415"
+    pending_tasks        : list of complaint dicts from the database.
+                           Each dict must have at least:
+                               'id', 'room_number', 'urgency', 'description'
+    staff_type           : 'MH' or 'WH'
+
+    Returns
+    -------
+    list[dict]  — tasks in optimal visit order, each enriched with:
+        'estimated_distance'  (float, metre-equivalents)
+        'route_note'          (str, human-readable explanation)
+        'parsed_room'         (str, canonical room string)
+    """
+
+    # ── 1. Parse the worker's current location ──────────────────────────────
+    origin = parse_room(current_location_str)
+    if origin is None:
+        raise ValueError(
+            f"Cannot parse current location '{current_location_str}'. "
+            "Expected format: <Block>-<Floor><Room>, e.g. 'Q-415'."
+        )
+
+    valid_blocks = get_block_set(staff_type)
+
+    # ── 2. Validate worker's own block belongs to their zone ─────────────────
+    if origin.block not in valid_blocks:
+        raise ValueError(
+            f"Worker block '{origin.block}' is not in {staff_type} zone. "
+            "Possible zone mismatch — check staff_type."
+        )
+
+    # ── 3. Split tasks into critical vs normal; skip wrong-zone tasks ────────
+    critical_tasks = []
+    normal_tasks   = []
+    skipped        = []
+
+    for task in pending_tasks:
+        dept = (task.get('department') or '').strip().lower()
+        if dept == 'mess':
+            continue
+        raw_room = task.get('room_number', '')
+        target   = parse_room(raw_room)
+
+        if target is None:
+            # Unparseable room — still include but flag it
+            task = dict(task)  # shallow copy so we don't mutate caller's data
+            task['estimated_distance'] = 99999.0
+            task['route_note']         = f"⚠️ Room '{raw_room}' could not be parsed."
+            task['parsed_room']        = raw_room
+            skipped.append(task)
+            continue
+
+        # ── FIREWALL: skip tasks in the wrong hostel zone ──────────────────
+        if target.block not in valid_blocks:
+            continue   # silently filter — wrong zone for this worker
+
+        # Compute cost
+        cost = topological_distance(origin, target, staff_type)
+        task = dict(task)   # shallow copy
+        task['estimated_distance'] = round(cost, 1)
+        task['parsed_room']        = f"{target.block}-{target.floor}{target.room_num:02d}"
+        task['_target']            = target   # internal use for sorting
+
+        urgency = (task.get('urgency') or '').strip().lower()
+
+        if urgency in ('critical', 'high'):
+            # ── URGENCY OVERRIDE: critical/high jumps the queue ────────────
+            task['route_note'] = (
+                f"🚨 PRIORITY — {urgency.upper()} urgency. "
+                f"Distance: ~{task['estimated_distance']}m equivalent."
+            )
+            critical_tasks.append(task)
+        else:
+            task['route_note'] = (
+                f"📍 {target.block}-Block, Floor {target.floor}. "
+                f"Estimated walking cost: ~{task['estimated_distance']}m equivalent."
+            )
+            normal_tasks.append(task)
+
+    # ── 4. Sort each group by physical distance ──────────────────────────────
+    critical_tasks.sort(key=lambda t: t['estimated_distance'])
+    normal_tasks.sort(key=lambda t:   t['estimated_distance'])
+    skipped.sort(key=lambda t:        t.get('id', 0))
+
+    # ── 5. Remove the internal _target key before returning ─────────────────
+    def clean(task_list):
+        out = []
+        for t in task_list:
+            t = dict(t)
+            t.pop('_target', None)
+            out.append(t)
+        return out
+
+    return clean(critical_tasks) + clean(normal_tasks) + clean(skipped)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTION 9 — FASTAPI ROUTER
+#  Drop this into main.py:
+#      from routing_service import router as routing_router
+#      app.include_router(routing_router)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import APIRouter, Depends, Query, HTTPException
+from sqlalchemy.orm import Session
+from database import SessionLocal
+import models
+
+router = APIRouter(prefix="/maintenance", tags=["Maintenance Routing"])
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@router.get("/next-task")
+def get_next_task(
+    current_room: str = Query(
+        ...,
+        description="Worker's current room, e.g. 'Q-415'",
+        example="Q-415",
+    ),
+    staff_type: str = Query(
+        ...,
+        description="'MH' for Men's Hostel staff, 'WH' for Women's Hostel staff",
+        example="MH",
+    ),
+    limit: int = Query(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of tasks to return",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Return the optimally-sorted list of pending maintenance tasks for a worker.
+
+    Rules enforced:
+    - Staff type must be 'MH' or 'WH'.
+    - MH staff only see complaints in MH blocks (A-T except I/O).
+    - WH staff only see complaints in WH blocks (A-J + S).
+    - CRITICAL/HIGH urgency tasks always appear first regardless of distance.
+    - Tasks within the same urgency tier are sorted by walking cost.
+    """
+
+    # ── Validate staff_type ──────────────────────────────────────────────────
+    staff_type = staff_type.strip().upper()
+    if staff_type not in (STAFF_MH, STAFF_WH):
+        raise HTTPException(
+            status_code=400,
+            detail=f"staff_type must be 'MH' or 'WH', got '{staff_type}'."
+        )
+
+    # ── Validate current_room ────────────────────────────────────────────────
+    origin = parse_room(current_room)
+    if origin is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot parse room '{current_room}'. "
+                "Use format Block-FloorRoom, e.g. 'Q-415'."
+            )
+        )
+
+    valid_blocks = get_block_set(staff_type)
+    if origin.block not in valid_blocks:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Block '{origin.block}' does not belong to {staff_type} zone. "
+                "You are not authorised to be routed from this block."
+            )
+        )
+
+    # ── Fetch all pending complaints from the database ───────────────────────
+    raw_complaints = (
+        db.query(models.Complaint)
+        .filter(models.Complaint.status == "pending")
+        .all()
+    )
+
+    # ── Convert SQLAlchemy objects to plain dicts ────────────────────────────
+    # The routing algorithm works on plain dicts so it stays DB-agnostic.
+    pending_tasks = []
+    for c in raw_complaints:
+        pending_tasks.append({
+            "id":          c.id,
+            "room_number": c.room_number if hasattr(c, 'room_number') else "",
+            "description": c.description,
+            "category":    c.category,
+            "urgency":     c.urgency,
+            "department":  c.department,
+            "status":      c.status,
+            "created_at":  str(c.created_at),
+            "blockchain_hash": c.blockchain_hash,
+        })
+
+    # ── Run the routing algorithm ────────────────────────────────────────────
+    try:
+        sorted_tasks = calculate_optimal_route(
+            current_location_str=current_room,
+            pending_tasks=pending_tasks,
+            staff_type=staff_type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    sorted_tasks = sorted_tasks[:limit]
+
+    # ── Build response ───────────────────────────────────────────────────────
+    if not sorted_tasks:
+        return {
+            "status":        "no_tasks",
+            "message":       f"No pending tasks found in {staff_type} zone. ✅",
+            "current_room":  current_room,
+            "staff_type":    staff_type,
+            "tasks":         [],
+        }
+
+    next_task = sorted_tasks[0]
+
+    return {
+        "status":          "ok",
+        "current_room":    current_room,
+        "staff_type":      staff_type,
+        "total_tasks":     len(sorted_tasks),
+        "next_task":       next_task,          # single most urgent / closest task
+        "full_route":      sorted_tasks,       # entire sorted queue
+    }
+
+
+@router.get("/distance-check")
+def distance_check(
+    from_room: str = Query(..., example="Q-415"),
+    to_room:   str = Query(..., example="R-302"),
+    staff_type: str = Query(..., example="MH"),
+):
+    """
+    Utility endpoint — calculate the routing cost between two rooms.
+    Useful for debugging and testing the distance model.
+    """
+    staff_type = staff_type.strip().upper()
+    if staff_type not in (STAFF_MH, STAFF_WH):
+        raise HTTPException(status_code=400, detail="staff_type must be 'MH' or 'WH'.")
+
+    origin = parse_room(from_room)
+    target = parse_room(to_room)
+
+    if origin is None:
+        raise HTTPException(status_code=400, detail=f"Cannot parse from_room '{from_room}'.")
+    if target is None:
+        raise HTTPException(status_code=400, detail=f"Cannot parse to_room '{to_room}'.")
+
+    matrix   = get_distance_matrix(staff_type)
+    outside  = matrix.get(origin.block, {}).get(target.block, 99999.0)
+    floor_c  = abs(origin.floor - target.floor) * FLOOR_WEIGHT
+    room_c   = abs(origin.room_num - target.room_num) * ROOM_WEIGHT
+    total    = outside + floor_c + room_c
+
+    return {
+        "from_room":             from_room,
+        "to_room":               to_room,
+        "staff_type":            staff_type,
+        "outside_block_dist_m":  outside,
+        "floor_delta":           abs(origin.floor - target.floor),
+        "floor_cost":            floor_c,
+        "room_delta":            abs(origin.room_num - target.room_num),
+        "room_cost":             room_c,
+        "total_cost_equiv_m":    round(total, 1),
+        "formula": (
+            f"{outside} + ({abs(origin.floor-target.floor)} × {FLOOR_WEIGHT}) "
+            f"+ ({abs(origin.room_num-target.room_num)} × {ROOM_WEIGHT}) "
+            f"= {round(total, 1)}"
+        ),
+    }
+
+
+// File: schemas.py
+from typing import Optional
+from pydantic import BaseModel, EmailStr
+
+
+class OTPRequest(BaseModel):
+    email: EmailStr
+
+
+class OTPVerify(BaseModel):
+    email: EmailStr
+    otp: str
+
+
+class ComplaintCreate(BaseModel):
+    email:       EmailStr
+    description: str
+    room_number: Optional[str] = None  
+
+class StaffRegister(BaseModel):
+    staff_id:    str
+    name:        str
+    password:    str
+    hostel_zone: str
+    block:       str
+
+class StaffUpdate(BaseModel):
+    staff_id:    str
+    name:        Optional[str] = None
+    password:    Optional[str] = None
+    hostel_zone: Optional[str] = None
+    block:       Optional[str] = None
+
+class StaffLogin(BaseModel):
+    staff_id: str
+    password: str
+
+class StaffLoginResponse(BaseModel):
+    message:     str
+    staff_id:    str
+    name:        str
+    hostel_zone: str
+
+class StaffRegisterWithOTP(BaseModel):
+    staff_id:    str
+    name:        str
+    password:    str
+    hostel_zone: str
+    block:       str
+    email:       str
+    otp:         str
+
+class ComplaintReview(BaseModel):
+    stars: int
+    text:  Optional[str] = None
+
+// File: train_model.py
+import json
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+import joblib
+
+# Load dataset
+with open("dataset.json", "r") as f:
+    data = json.load(f)
+
+df = pd.DataFrame(data)
+
+# Split data
+train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+
+# Create pipelines
+priority_model = Pipeline([
+    ("tfidf", TfidfVectorizer()),
+    ("clf", LogisticRegression(max_iter=1000))
+])
+
+department_model = Pipeline([
+    ("tfidf", TfidfVectorizer()),
+    ("clf", LogisticRegression(max_iter=1000))
+])
+
+category_model = Pipeline([
+    ("tfidf", TfidfVectorizer()),
+    ("clf", LogisticRegression(max_iter=1000))
+])
+
+# Train models
+priority_model.fit(train_df["text"], train_df["priority"])
+department_model.fit(train_df["text"], train_df["department"])
+category_model.fit(train_df["text"], train_df["category"])
+
+# Evaluate
+print("Priority Accuracy:", priority_model.score(test_df["text"], test_df["priority"]))
+print("Department Accuracy:", department_model.score(test_df["text"], test_df["department"]))
+print("Category Accuracy:", category_model.score(test_df["text"], test_df["category"]))
+
+# Save models
+joblib.dump(priority_model, "priority_model.pkl")
+joblib.dump(department_model, "department_model.pkl")
+joblib.dump(category_model, "category_model.pkl")
+
+print("Models trained and saved!")
+
