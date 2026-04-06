@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 smart_hostel.db
+combined_files/
