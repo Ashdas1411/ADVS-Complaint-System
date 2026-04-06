@@ -4,7 +4,7 @@
   document.documentElement.setAttribute('data-theme', saved);
 })();
 
-const API = 'http://127.0.0.1:8000';
+const API = 'https://advs-complaint-system.onrender.com';
 
 function togglePw(inputId, btn) {
   var input = document.getElementById(inputId);
