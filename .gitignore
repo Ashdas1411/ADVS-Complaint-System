@@ -1,5 +1,8 @@
 .env
 __pycache__/
 *.pyc
-smart_hostel.db
+*.db
+*.pkl
+*.log
 combined_files/
+.DS_Store

@@ -3406,3 +3406,97 @@ textarea#description, #roomNumber {
 [data-theme="light"] .student-flip-front { background: var(--bg2); }
 [data-theme="light"] .student-flip-back  { background: var(--elevated); border-color: var(--rim-bright); }
 [data-theme="light"] .star-submit-btn    { background: var(--accent); color: var(--btn-text); }
+
+
+
+/* SETTINGS OTP MODAL STYLES  */
+
+/* Wider modal box for OTP flows */
+.sotp-box {
+  border-color: var(--border-strong);
+  max-width: 440px;
+  gap: 18px;
+}
+
+/* Circular icon ring at top of modal */
+.sotp-icon-ring {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  background: var(--bg3);
+  color: var(--blue-light);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+}
+
+/* Green variant for "verified" state */
+.sotp-icon-green {
+  border-color: var(--green-rim);
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+/* Email display row */
+.sotp-email-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text2);
+  font-family: var(--font-mono);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 9px 14px;
+}
+
+.sotp-email-row strong {
+  color: var(--blue-light);
+}
+
+/* Back button row */
+.sotp-back-row {
+  margin-bottom: -4px;
+}
+
+/* Send OTP button (reuse confirm style but accent colour) */
+.sotp-send-btn {
+  background: var(--blue) !important;
+}
+
+/* Light mode overrides */
+[data-theme="light"] .sotp-icon-ring {
+  border-color: var(--border-strong);
+  background: var(--bg3);
+  color: var(--accent);
+}
+
+[data-theme="light"] .sotp-icon-green {
+  border-color: var(--green-rim);
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+[data-theme="light"] .sotp-email-row {
+  background: var(--bg3);
+  border-color: var(--border);
+  color: var(--text2);
+}
+
+[data-theme="light"] .sotp-email-row strong {
+  color: var(--accent);
+}
+
+[data-theme="light"] .sotp-send-btn {
+  background: var(--accent) !important;
+  color: var(--btn-text) !important;
+}
+
+/* Animate the modal box in */
+.sotp-box {
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}

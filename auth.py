@@ -147,6 +147,7 @@ def login_staff(request: schemas.StaffLogin, db: Session = Depends(get_db)):
         "name":        staff.name,
         "hostel_zone": staff.hostel_zone,
         "block":       staff.block or "",
+        "email":       staff.email or "",
     }
 
 @router.patch("/staff/update")
@@ -224,6 +225,7 @@ def register_staff_with_otp(request: schemas.StaffRegisterWithOTP, db: Session =
         password_hash = hashed,
         hostel_zone   = hostel_zone,
         block         = request.block.strip().upper(),
+        email         = request.email,
     )
     db.add(staff)
     db.commit()

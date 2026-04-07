@@ -50,3 +50,4 @@ class MaintenanceStaff(Base):
     hostel_zone  = Column(String(10))   # "MH" or "WH"
     block        = Column(String(5), nullable=True)   # e.g. "Q", "R", "A"
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
+    email = Column(String(255), unique=True, nullable=True)

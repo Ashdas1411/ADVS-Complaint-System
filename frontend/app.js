@@ -4,7 +4,8 @@
   document.documentElement.setAttribute('data-theme', saved);
 })();
 
-const API = 'https://advs-complaint-system.onrender.com';
+// const API = 'https://advs-complaint-system.onrender.com';
+const API = 'http://127.0.0.1:8000';
 
 function togglePw(inputId, btn) {
   var input = document.getElementById(inputId);
@@ -1721,18 +1722,6 @@ document.getElementById('saveNameBtn').addEventListener('click', function () {
   staffSettingsSave({ name: name });
 });
 
-document.getElementById('savePasswordBtn').addEventListener('click', function () {
-  var pw = document.getElementById('settingsPasswordInput').value;
-  if (!pw || pw.length < 6) { showToast('Password must be at least 6 characters', 'error'); return; }
-  staffSettingsSave({ password: pw });
-});
-
-document.getElementById('saveAssignmentBtn').addEventListener('click', function () {
-  var zone  = document.getElementById('settingsZoneSelect').value;
-  var block = document.getElementById('settingsBlockSelect').value;
-  staffSettingsSave({ hostel_zone: zone, block: block });
-});
-
 function staffSettingsSave(fields) {
   if (!currentStaffData) return;
   var payload = Object.assign({ staff_id: currentStaffData.staff_id }, fields);
@@ -1754,29 +1743,6 @@ function staffSettingsSave(fields) {
   })
   .catch(function(e) { showToast(e.message, 'error'); });
 }
-
-document.getElementById('deleteAccountBtn').addEventListener('click', function () {
-  document.getElementById('deleteModal').style.display = 'flex';
-});
-
-document.getElementById('modalCancelBtn').addEventListener('click', function () {
-  document.getElementById('deleteModal').style.display = 'none';
-});
-
-document.getElementById('modalConfirmBtn').addEventListener('click', function () {
-  if (!currentStaffData) return;
-  fetch(API + '/staff/delete?staff_id=' + encodeURIComponent(currentStaffData.staff_id), {
-    method: 'DELETE'
-  })
-  .then(function(res) { return res.json().then(function(d) { return { ok: res.ok, data: d }; }); })
-  .then(function(r) {
-    if (!r.ok) throw new Error(r.data.detail || 'Delete failed');
-    document.getElementById('deleteModal').style.display = 'none';
-    document.getElementById('logoutBtn').click();
-    showToast('Account deleted', 'info');
-  })
-  .catch(function(e) { showToast(e.message, 'error'); });
-});
 
 /* REVIEW REASON MODAL */
 document.getElementById('reviewReasonSkipBtn').addEventListener('click', function () {
@@ -2037,12 +2003,6 @@ function renderResolvedStudent(filter) {
     grid.innerHTML = '';
     grid.style.display = 'none';
     empty.style.display = 'flex';
-    empty.style.flexDirection = 'column';
-    empty.style.alignItems = 'center';
-    empty.style.gap = '12px';
-    empty.style.padding = '80px 0';
-    empty.style.color = 'var(--text3)';
-    empty.style.fontSize = '14px';
     var msg = empty.querySelector('p');
     if (msg) {
       msg.textContent = allResolvedStudent.length === 0
@@ -2053,44 +2013,53 @@ function renderResolvedStudent(filter) {
   }
 
   empty.style.display = 'none';
-  grid.style.display = 'grid';
+  grid.style.display  = 'grid';
+
   grid.innerHTML = filtered.map(function(c, i) {
     var alreadyReviewed = c.review_stars != null;
+
     var starsHtml = '';
     for (var s = 1; s <= 5; s++) {
-      starsHtml += '<button type="button" class="star-btn' +
-        (alreadyReviewed && s <= c.review_stars ? ' star-lit' : '') +
-        '" onclick="rsStarClick(event,' + c.id + ',' + s + ')">' +
-        (alreadyReviewed && s <= c.review_stars ? '★' : '☆') +
-      '</button>';
+      var lit = alreadyReviewed && s <= c.review_stars;
+      starsHtml +=
+        '<button type="button" class="star-btn' + (lit ? ' star-lit' : '') + '" ' +
+        'onclick="rsStarClick(event,' + c.id + ',' + s + ')">' +
+        (lit ? '★' : '☆') +
+        '</button>';
     }
 
-    var ratingSection = alreadyReviewed
-      ? '<div class="rs-rating-done">' +
-          '<div class="star-rating-label">Your Rating</div>' +
-          '<div class="star-rating-row">' + starsHtml + '</div>' +
-          '<div class="star-already-chip">✓ Feedback submitted</div>' +
-        '</div>'
-      : '<div class="rs-rating-prompt">' +
-          '<div class="star-rating-label">Rate this resolution</div>' +
-          '<div class="star-rating-row" id="rs-stars-' + c.id + '">' + starsHtml + '</div>' +
-          '<button class="star-submit-btn" id="rs-submit-' + c.id + '" disabled ' +
-            'onclick="rsSubmitReview(' + c.id + ')">Submit Rating</button>' +
-        '</div>';
+    var backContent = alreadyReviewed
+      ? '<div class="star-rating-label">Your Rating</div>' +
+        '<div class="star-rating-row">' + starsHtml + '</div>' +
+        '<div class="star-already-chip">✓ Feedback submitted</div>'
+      : '<div class="star-rating-label">Rate this resolution</div>' +
+        '<div class="star-rating-row" id="rs-stars-' + c.id + '">' + starsHtml + '</div>' +
+        '<button class="star-submit-btn" id="rs-submit-' + c.id + '" disabled ' +
+        'onclick="rsSubmitReview(' + c.id + ')">Submit Rating</button>';
+
+    var hintText = alreadyReviewed
+      ? '★'.repeat(c.review_stars) + '☆'.repeat(5 - c.review_stars)
+      : 'TAP TO RATE';
 
     return (
-      '<div class="complaint-card rs-card" style="animation-delay:' + (i * 40) + 'ms;border-left:3px solid var(--green)">' +
-        '<div class="card-meta">' +
-          '<span class="badge ' + getBadgeClass(c.urgency) + '">' + (c.urgency || 'unknown') + '</span>' +
-          '<span class="badge badge-completed">completed</span>' +
+      '<div class="student-flip-card" id="sfc-rs-' + c.id + '" ' +
+      'style="animation-delay:' + (i * 40) + 'ms" ' +
+      'onclick="handleStudentFlipClick(event, this)">' +
+        '<div class="student-flip-card-inner">' +
+          '<div class="student-flip-front">' +
+            '<div class="card-meta">' +
+              '<span class="badge ' + getBadgeClass(c.urgency) + '">' + (c.urgency || 'unknown') + '</span>' +
+              '<span class="badge badge-completed">completed</span>' +
+            '</div>' +
+            '<div class="card-description">' + escapeHtml(c.description || '') + '</div>' +
+            '<div class="card-footer">' +
+              '<span class="card-dept">' + (c.department || 'unassigned') + '</span>' +
+              '<span class="card-date">' + formatDate(c.created_at) + '</span>' +
+            '</div>' +
+            '<div class="s-flip-hint">' + hintText + '</div>' +
+          '</div>' +
+          '<div class="student-flip-back">' + backContent + '</div>' +
         '</div>' +
-        '<div class="card-description">' + escapeHtml(c.description || '') + '</div>' +
-        '<div class="card-footer">' +
-          '<span class="card-dept">' + (c.department || 'unassigned') + '</span>' +
-          '<span class="card-date">' + formatDate(c.created_at) + '</span>' +
-        '</div>' +
-        '<div class="rs-divider"></div>' +
-        ratingSection +
       '</div>'
     );
   }).join('');
@@ -2147,4 +2116,251 @@ document.querySelectorAll('[data-filter-rs]').forEach(function(btn) {
     btn.classList.add('active');
     renderResolvedStudent(btn.dataset.filterRs);
   });
+});
+
+document.getElementById('sotpCancelBtn2').addEventListener('click', closeSettingsOtpModal);
+
+/* ── State for pending settings actions ── */
+var _settingsAction = null; // 'password' | 'assignment' | 'delete'
+var _settingsPending = {};  // holds { password, zone, block } as needed
+
+/* ═══════════════════════════════════════════
+   GENERIC SETTINGS OTP MODAL HELPERS
+═══════════════════════════════════════════ */
+
+function openSettingsOtpModal(action, pendingData, afterSendCb) {
+  _settingsAction  = action;
+  _settingsPending = pendingData || {};
+
+  var modal = document.getElementById('settingsOtpModal');
+  var title = document.getElementById('sotpTitle');
+  var desc  = document.getElementById('sotpDesc');
+  var emailDisplay = document.getElementById('sotpEmailDisplay');
+
+  var titles = {
+    password:   'Confirm Password Change',
+    assignment: 'Confirm Zone & Block Change',
+    delete:     'Confirm Account Deletion'
+  };
+
+  var descs = {
+    password:   'For your security, we need to verify your identity before changing your password.',
+    assignment: 'Changing your hostel zone and block requires email verification.',
+    delete:     'This action is irreversible. Please verify your identity before deleting your account.'
+  };
+
+  title.textContent = titles[action] || 'Verify Identity';
+  desc.textContent  = descs[action]  || '';
+  emailDisplay.textContent = (currentStaffData && currentStaffData.email) || 'your registered email';
+
+  // Reset OTP digits
+  document.querySelectorAll('.sotp-digit').forEach(function(d) { d.value = ''; });
+  document.getElementById('sotpStep1').style.display = 'flex';
+  document.getElementById('sotpStep2').style.display = 'none';
+  document.getElementById('sotpSendBtn').disabled = false;
+
+  modal.style.display = 'flex';
+
+  if (afterSendCb) afterSendCb();
+}
+
+function closeSettingsOtpModal() {
+  document.getElementById('settingsOtpModal').style.display = 'none';
+  _settingsAction  = null;
+  _settingsPending = {};
+}
+
+/* Send OTP for settings action */
+document.getElementById('sotpSendBtn').addEventListener('click', function() {
+  if (!currentStaffData) return;
+  var email = currentStaffData.email;
+  if (!email) {
+    // If we don't have email in session, use the staff_id approach
+    // For now, prompt user — but typically staff email was set at registration
+    showToast('No email on file. Please contact admin.', 'error');
+    return;
+  }
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+
+  fetch(API + '/generate-otp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: email })
+  })
+  .then(function(res) { return res.json().then(function(d) { return { ok: res.ok, data: d }; }); })
+  .then(function(r) {
+    if (!r.ok) throw new Error(r.data.detail || 'Failed to send OTP');
+    showToast('OTP sent to ' + email, 'success');
+    document.getElementById('sotpStep1').style.display = 'none';
+    document.getElementById('sotpStep2').style.display = 'flex';
+    document.querySelectorAll('.sotp-digit')[0].focus();
+  })
+  .catch(function(e) {
+    showToast(e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Send OTP';
+  });
+});
+
+/* OTP digit input behaviour */
+var sotpDigits = document.querySelectorAll('.sotp-digit');
+sotpDigits.forEach(function(inp, i) {
+  inp.addEventListener('input', function() {
+    inp.value = inp.value.replace(/\D/g, '');
+    if (inp.value && i < sotpDigits.length - 1) sotpDigits[i + 1].focus();
+  });
+  inp.addEventListener('keydown', function(e) {
+    if (e.key === 'Backspace' && !inp.value && i > 0) sotpDigits[i - 1].focus();
+  });
+  inp.addEventListener('paste', function(e) {
+    var txt = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '');
+    if (txt.length === 6) {
+      sotpDigits.forEach(function(d, j) { d.value = txt[j] || ''; });
+      sotpDigits[5].focus();
+      e.preventDefault();
+    }
+  });
+});
+
+function getSotpOtp() {
+  return Array.from(sotpDigits).map(function(d) { return d.value; }).join('');
+}
+
+/* Verify OTP and execute the pending action */
+document.getElementById('sotpVerifyBtn').addEventListener('click', function() {
+  var otp = getSotpOtp();
+  if (otp.length !== 6) { showToast('Enter all 6 digits', 'error'); return; }
+  if (!currentStaffData || !currentStaffData.email) { showToast('No email on file.', 'error'); return; }
+
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+
+  fetch(API + '/verify-otp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: currentStaffData.email, otp: otp })
+  })
+  .then(function(res) { return res.json().then(function(d) { return { ok: res.ok, data: d }; }); })
+  .then(function(r) {
+    if (!r.ok) throw new Error(r.data.detail || 'Invalid OTP');
+    closeSettingsOtpModal();
+    executePendingSettingsAction();
+  })
+  .catch(function(e) {
+    showToast(e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Verify & Confirm';
+  });
+});
+
+document.getElementById('sotpCancelBtn').addEventListener('click', closeSettingsOtpModal);
+document.getElementById('sotpBackBtn').addEventListener('click', function() {
+  document.getElementById('sotpStep1').style.display = 'flex';
+  document.getElementById('sotpStep2').style.display = 'none';
+  document.getElementById('sotpSendBtn').disabled = false;
+  document.getElementById('sotpSendBtn').textContent = 'Send OTP';
+  document.querySelectorAll('.sotp-digit').forEach(function(d) { d.value = ''; });
+});
+
+/* Execute the action that was pending OTP verification */
+function executePendingSettingsAction() {
+  if (_settingsAction === 'password') {
+    // Show the new password input modal
+    document.getElementById('settingsNewPwModal').style.display = 'flex';
+    document.getElementById('settingsNewPwInput').value = '';
+    document.getElementById('settingsConfirmPwInput').value = '';
+    document.getElementById('settingsNewPwInput').focus();
+
+  } else if (_settingsAction === 'assignment') {
+    staffSettingsSave({ hostel_zone: _settingsPending.zone, block: _settingsPending.block });
+
+  } else if (_settingsAction === 'delete') {
+    // Proceed with deletion
+    fetch(API + '/staff/delete?staff_id=' + encodeURIComponent(currentStaffData.staff_id), {
+      method: 'DELETE'
+    })
+    .then(function(res) { return res.json().then(function(d) { return { ok: res.ok, data: d }; }); })
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.data.detail || 'Delete failed');
+      document.getElementById('logoutBtn').click();
+      showToast('Account deleted', 'info');
+    })
+    .catch(function(e) { showToast(e.message, 'error'); });
+  }
+}
+
+/* ── New Password Modal (shown after OTP verified for password change) ── */
+document.getElementById('settingsNewPwConfirmBtn').addEventListener('click', function() {
+  var pw      = document.getElementById('settingsNewPwInput').value;
+  var confirm = document.getElementById('settingsConfirmPwInput').value;
+  var fb      = document.getElementById('settingsNewPwFeedback');
+
+  if (!pw || pw.length < 6) {
+    fb.textContent = 'Password must be at least 6 characters.';
+    fb.style.display = 'block';
+    return;
+  }
+  if (pw !== confirm) {
+    fb.textContent = 'Passwords do not match.';
+    fb.style.display = 'block';
+    return;
+  }
+  fb.style.display = 'none';
+  document.getElementById('settingsNewPwModal').style.display = 'none';
+  staffSettingsSave({ password: pw });
+  document.getElementById('settingsPasswordInput').value = '';
+});
+
+document.getElementById('settingsNewPwCancelBtn').addEventListener('click', function() {
+  document.getElementById('settingsNewPwModal').style.display = 'none';
+});
+
+/* ── REPLACE the three settings save listeners ── */
+
+// PASSWORD — intercept, ask for OTP first
+document.getElementById('savePasswordBtn').addEventListener('click', function() {
+  if (!currentStaffData) return;
+  if (!currentStaffData.email) {
+    showToast('No email address on record for OTP.', 'error');
+    return;
+  }
+  openSettingsOtpModal('password', {});
+});
+
+// ASSIGNMENT — validate both zone+block chosen, then OTP
+document.getElementById('saveAssignmentBtn').addEventListener('click', function() {
+  if (!currentStaffData) return;
+  var zone  = document.getElementById('settingsZoneSelect').value;
+  var block = document.getElementById('settingsBlockSelect').value;
+  if (!zone || !block) {
+    showToast('Please select both a hostel zone and a block.', 'error');
+    return;
+  }
+  if (!currentStaffData.email) {
+    showToast('No email address on record for OTP.', 'error');
+    return;
+  }
+  openSettingsOtpModal('assignment', { zone: zone, block: block });
+});
+
+// DELETE — OTP before showing danger confirm
+document.getElementById('deleteAccountBtn').addEventListener('click', function() {
+  if (!currentStaffData) return;
+  if (!currentStaffData.email) {
+    showToast('No email address on record for OTP.', 'error');
+    return;
+  }
+  openSettingsOtpModal('delete', {});
+});
+
+// OLD delete modal buttons — keep cancel wired, confirm is now unused but keep for safety
+document.getElementById('modalCancelBtn').addEventListener('click', function() {
+  document.getElementById('deleteModal').style.display = 'none';
+});
+// modalConfirmBtn is now bypassed (deletion happens via OTP flow), but keep it harmless
+document.getElementById('modalConfirmBtn').addEventListener('click', function() {
+  document.getElementById('deleteModal').style.display = 'none';
 });
