@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from database import engine, Base
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 import models
 from auth import router as auth_router
@@ -25,6 +27,8 @@ app.include_router(complaint_router)
 app.include_router(analytics_router)
 app.include_router(routing_router)
 
+app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
 @app.get("/")
-def root():
-    return {"message": "ADVS Smart Hostel Backend Running"}
+async def frontend():
+    return FileResponse("frontend/index.html")
