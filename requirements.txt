@@ -2,8 +2,9 @@ fastapi
 uvicorn
 sqlalchemy
 python-dotenv
-passlib[bcrypt]
-scikit-learn
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+scikit-learn==1.7.1
 joblib
 numpy
 python-multipart
