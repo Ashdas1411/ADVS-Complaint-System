@@ -5,8 +5,9 @@ An AI-powered complaint management platform designed to modernize hostel mainten
 # ADVS Portal
 
 [![Live Demo](https://img.shields.io/badge/Live-Demo-success)](https://advs-complaint-system-production.up.railway.app)
-[![Python](https://img.shields.io/badge/Python-3.11-blue)]()
-[![FastAPI](https://img.shields.io/badge/FastAPI-Backend-green)]()
+[![Python](https://img.shields.io/badge/Python-3.11-blue)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Backend-green)](https://fastapi.tiangolo.com/)
+[![Railway](https://img.shields.io/badge/Deployment-Railway-purple)](https://railway.com/)
 
 An AI-powered complaint management platform...
 
@@ -32,6 +33,15 @@ This project addresses these challenges by providing a centralized complaint man
 - secure authentication systems
 
 The platform is designed to improve operational efficiency, accountability, and response time within hostel infrastructure management.
+
+---
+
+# Deployment
+
+The application is deployed on Railway and serves both the frontend and backend through a single FastAPI application.
+
+Live URL:
+https://advs-complaint-system-production.up.railway.app
 
 ---
 
