@@ -1,11 +1,12 @@
-/* ─── THEME TOGGLE ───────────────────────────────── */
+/* THEME TOGGLE */
 (function () {
   var saved = localStorage.getItem('hostel_theme') || 'dark';
   document.documentElement.setAttribute('data-theme', saved);
 })();
 
 // const API = 'https://advs-complaint-system.onrender.com';
-const API = "http://127.0.0.1:8000";
+// const API = "http://127.0.0.1:8000";
+const API = "";
 
 function togglePw(inputId, btn) {
   var input = document.getElementById(inputId);
